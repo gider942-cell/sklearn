@@ -1,0 +1,33 @@
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.metrics import classification_report
+
+data = load_breast_cancer()
+X, y = data.data, data.target
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+pipe = Pipeline([
+    ("scaler", StandardScaler()),
+    ("svc", SVC())
+])
+
+param_grid = {
+    "svc__C": [0.1, 1, 10],
+    "svc__kernel": ["linear", "rbf"],
+    "svc__gamma": ["scale", 0.01, 0.1]
+}
+
+grid = GridSearchCV(pipe, param_grid, cv=5, scoring="accuracy", n_jobs=-1)
+grid.fit(X_train, y_train)
+
+print("Лучший параметр:", grid.best_params_)
+print("Лучшая точность на кросс-валидации:", grid.best_score_)
+
+y_pred = grid.predict(X_test)
+print(classification_report(y_test, y_pred))
