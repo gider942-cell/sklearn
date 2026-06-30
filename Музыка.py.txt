@@ -1,0 +1,66 @@
+import numpy as np 
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.preprocessing import StandardScaler
+import pandas as pd 
+
+np.random.seed(42)
+n_samples = 500 
+
+tempo = np.random.uniform(60, 180, n_samples)
+loudness = np.random.uniform(-20, 0, n_samples)
+spectral_centroid = np.random.uniform(0, 1, n_samples)
+high_freq_ratio = np.random.uniform(0, 1, n_samples)
+
+df = pd.DataFrame({
+    'tempo': tempo,
+    'loudness': loudness,
+    'spectral_centroid': spectral_centroid,
+    'high_freq_ratio': high_freq_ratio
+})
+
+def assign_mood(row):
+    if row['tempo'] < 110 and row['loudness'] < -10 and row['spectral_centroid'] < 0.4:
+        return 'спокойный'
+    elif row['tempo'] > 130 and row['loudness'] > -8 and row['spectral_centroid'] > 0.6:
+        return 'энергичный'
+    else:
+        return np.random.choice(['спокойный', 'энергичный'], p=[0.6, 0.4])
+        
+df['mood'] = df.apply(assign_mood, axis=1)
+
+X = df[['tempo', 'loudness', 'spectral_centroid', 'high_freq_ratio']].values
+y = df['mood'].values
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train_scaled, y_train)
+
+y_pred = model.predict(X_test_scaled)
+print("Точность модели:", accuracy_score(y_test, y_pred))
+print("\nОтчёт по классификации:\n", classification_report(y_test, y_pred))
+
+feature_importances = model.feature_importances_
+features = ['tempo', 'loudness', 'spectral_centroid', 'high_freq_ratio']
+importance_df = pd.DataFrame({'feature': features, 'importance': feature_importances})
+importance_df = importance_df.sort_values(by='importance', ascending=False)
+print("\nВажность признаков:")
+print(importance_df)
+
+new_tracks = np.array([
+    [80, -15, 0.3, 0.2],
+    [140, -5, 0.7, 0.8], 
+    [115, -9, 0.5, 0.4]
+])
+new_tracks_scaled = scaler.transform(new_tracks)
+predictions = model.predict(new_tracks_scaled)
+
+print("\nПрогнозы для новых треков:")
+for i, pred in enumerate(predictions):
+    print(f"Трек {i+1}: {pred}")
