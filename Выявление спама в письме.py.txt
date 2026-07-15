@@ -1,0 +1,65 @@
+import pandas as pd 
+import numpy as np 
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+
+data = {
+    "text": [
+        "Вы выиграли миллион долларов! Нажмите сюда прямо сейчас!",
+        "Привет, как дела? Давай встретимся в пятницу.",
+        "Срочно! Только сегодня скидка 90% на все товары!",
+        "Напоминаю про завтрашнюю встречу в 10 утра.",
+        "Поздравляем! Ваш приз уже ждёт вас, перейдите по ссылке.",
+        "Можешь прислать отчёт за прошлый месяц?",
+        "Только сегодня! Уникальное предложение, не упустите!",
+        "Спасибо за помощь, всё получилось.",
+    ],
+    "label": ["spam", "ham", "spam", "ham", "spam", "ham", "spam", "ham"]
+}
+
+df = pd.DataFrame(data)
+
+X = df["text"]
+y = df["label"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y
+)
+
+model = Pipeline([
+    ("tfidf", TfidfVectorizer(
+        lowercase=True,
+        stop_words="english",     
+        ngram_range=(1, 2),        
+        max_df=0.95,               
+        min_df=1                  
+    )),
+    ("clf", LogisticRegression(max_iter=1000))
+])
+
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print("\nClassification report:\n", classification_report(y_test, y_pred))
+print("\nConfusion matrix:\n", confusion_matrix(y_test, y_pred, labels=["spam", "ham"]))
+
+new_emails = [
+    "Вы выиграли приз! Переходите по ссылке!",
+    "Привет, можем созвониться завтра?",
+    "Только сегодня — скидка 80% на всё!"
+]
+
+predictions = model.predict(new_emails)
+probabilities = model.predict_proba(new_emails)
+
+for email, pred, prob in zip(new_emails, predictions, probabilities):
+    print(f"\nПисьмо: {email}")
+    print(f"Предсказание: {pred}")
+    classes = model.classes_
+    for cls, p in zip(classes, prob):
+        print(f"  P({cls}) = {p:.3f}")
