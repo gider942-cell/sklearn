@@ -1,0 +1,204 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier, GradientBoostingClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from scipy.stats import mode
+import random
+
+# ----------------------------
+# 1. Генерация синтетических данных
+# ----------------------------
+
+def generate_user_actions(n_samples=5000, seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+
+    actions = ['view_product', 'add_to_cart', 'checkout', 'logout', 'search']
+    devices = ['mobile', 'desktop', 'tablet']
+    locations = ['US', 'EU', 'APAC', 'Other']
+
+    data = []
+    user_id = 1
+    current_time = pd.Timestamp('2024-01-01 00:00:00')
+
+    for i in range(n_samples):
+        # Имитация нескольких пользователей
+        if i % 200 == 0:
+            user_id += 1
+            current_time = pd.Timestamp('2024-01-01 00:00:00') + pd.Timedelta(days=i // 200)
+
+        action = random.choices(
+            actions,
+            weights=[0.4, 0.2, 0.1, 0.15, 0.15],  # разные вероятности
+            k=1
+        )[0]
+
+        # Добавляем скрытые зависимости: после 'search' чаще идёт 'view_product'
+        if action == 'search':
+            # С вероятностью 70% следующее действие будет 'view_product' в следующих шагах
+            pass  # логика будет учтена при генерации последовательностей
+
+        device = random.choice(devices)
+        location = random.choice(locations)
+        time_of_day = current_time.hour
+        session_length = np.random.randint(1, 60)  # минуты
+
+        data.append({
+            'user_id': user_id,
+            'timestamp': current_time,
+            'action': action,
+            'device': device,
+            'location': location,
+            'time_of_day': time_of_day,
+            'session_length': session_length
+        })
+
+        # Увеличиваем время на случайный интервал (от 30 сек до 2 часов)
+        delta_minutes = np.random.randint(0.5 * 60, 2 * 60)
+        current_time += pd.Timedelta(minutes=delta_minutes)
+
+    df = pd.DataFrame(data)
+    return df
+
+df = generate_user_actions()
+
+# ----------------------------
+# 2. Feature Engineering
+# ----------------------------
+
+# Кодируем категориальные признаки
+le_action = LabelEncoder()
+le_device = LabelEncoder()
+le_location = LabelEncoder()
+
+df['action_encoded'] = le_action.fit_transform(df['action'])
+df['device_encoded'] = le_device.fit_transform(df['device'])
+df['location_encoded'] = le_location.fit_transform(df['location'])
+
+# Создаём признаки на основе истории (скользящее окно)
+def create_features(df, window_size=3):
+    df_shifted = df.copy()
+    for i in range(1, window_size + 1):
+        df_shifted[f'prev_action_{i}'] = df_shifted['action_encoded'].shift(i)
+        df_shifted[f'prev_device_{i}'] = df_shifted['device_encoded'].shift(i)
+        df_shifted[f'prev_location_{i}'] = df_shifted['location_encoded'].shift(i)
+    
+    # Заполняем пропуски (первые строки)
+    df_shifted = df_shifted.dropna().reset_index(drop=True)
+    return df_shifted
+
+window_size = 3
+df_feat = create_features(df, window_size)
+
+# Целевая переменная: следующее действие
+df_feat['next_action'] = df_feat['action_encoded'].shift(-1)
+df_feat = df_feat.dropna().reset_index(drop=True)
+
+# Формируем X и y
+feature_cols = [col for col in df_feat.columns if col.startswith('prev_')]
+feature_cols += ['time_of_day', 'session_length']
+X = df_feat[feature_cols]
+y = df_feat['next_action']
+
+# ----------------------------
+# 3. Обучение модели
+# ----------------------------
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+
+print("Classification Report:\n", classification_report(y_test, y_pred, target_names=le_action.classes_))
+
+base_models = [
+    ('dt', DecisionTreeClassifier(max_depth=5)),
+    ('svc', SVC(probability=True)),
+    ('rf', RandomForestClassifier(n_estimators=200, random_state=42)),
+    ('gb', GradientBoostingClassifier(n_estimators=100, learning_rate=0.1)),
+    ('knn', KNeighborsClassifier(n_neighbors=5)),
+]
+
+stack = StackingClassifier(estimators=base_models, final_estimator = LogisticRegression())
+
+stack.fit(X_train, y_train)
+y_pred = stack.predict(X_test)
+
+# ----------------------------
+# 4. Визуализация
+# ----------------------------
+
+# Распределение действий
+plt.figure(figsize=(10, 5))
+df['action'].value_counts().plot(kind='bar', color='skyblue')
+plt.title('Распределение действий пользователей')
+plt.xlabel('Действие')
+plt.ylabel('Количество')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+# Матрица ошибок
+cm = confusion_matrix(y_test, y_pred)
+plt.figure(figsize=(8, 6))
+plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+plt.title('Матрица ошибок (Confusion Matrix)')
+plt.colorbar()
+tick_marks = np.arange(len(le_action.classes_))
+plt.xticks(tick_marks, le_action.classes_, rotation=45)
+plt.yticks(tick_marks, le_action.classes_)
+plt.ylabel('Истинное значение')
+plt.xlabel('Предсказание')
+plt.tight_layout()
+plt.show()
+
+# ----------------------------
+# 5. Пример предсказания следующего действия
+# ----------------------------
+
+def predict_next_action(last_actions, last_devices, last_locations, time_of_day, session_length):
+    """
+    last_actions: список из window_size последних действий (строки)
+    last_devices: список устройств
+    last_locations: список локаций
+    """
+    # Кодируем
+    actions_enc = le_action.transform(last_actions)
+    devices_enc = le_device.transform(last_devices)
+    locations_enc = le_location.transform(last_locations)
+
+    # Формируем вектор признаков
+    row = {}
+    for i, val in enumerate(actions_enc):
+        row[f'prev_action_{i+1}'] = val
+    for i, val in enumerate(devices_enc):
+        row[f'prev_device_{i+1}'] = val
+    for i, val in enumerate(locations_enc):
+        row[f'prev_location_{i+1}'] = val
+
+    row['time_of_day'] = time_of_day
+    row['session_length'] = session_length
+
+    X_input = pd.DataFrame([row])
+    pred_encoded = model.predict(X_input)[0]
+    pred_action = le_action.inverse_transform([pred_encoded])[0]
+    return pred_action
+
+# Пример использования
+last_actions = ['search', 'view_product', 'view_product']
+last_devices = ['mobile', 'mobile', 'mobile']
+last_locations = ['US', 'US', 'US']
+time_of_day = 14
+session_length = 25
+
+next_act = predict_next_action(last_actions, last_devices, last_locations, time_of_day, session_length)
+print(f"Предсказано следующее действие: {next_act}")
