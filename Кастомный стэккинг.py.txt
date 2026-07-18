@@ -1,0 +1,204 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.datasets import make_classification
+from sklearn.model_selection import StratifiedKFold
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, ExtraTreesClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, log_loss, confusion_matrix
+from scipy.optimize import minimize
+
+# ----------------------------
+# 1. Генерация данных
+# ----------------------------
+X, y = make_classification(
+    n_samples=2000,
+    n_features=30,
+    n_informative=15,
+    n_redundant=5,
+    n_clusters_per_class=2,
+    flip_y=0.05,
+    random_state=42
+)
+df = pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
+df["target"] = y
+
+# ----------------------------
+# 2. Подготовка: разбиение признаков
+# ----------------------------
+n_models = len(base_models)
+feature_groups = np.array_split(df.columns[:-1], n_models)  # исключаем target
+print("Группы признаков для базовых моделей:")
+for i, grp in enumerate(feature_groups):
+    print(f"Model {i}: {list(grp)}")
+
+# ----------------------------
+# 3. Базовые модели
+# ----------------------------
+base_models = [
+    RandomForestClassifier(n_estimators=100, max_depth=6, random_state=42),
+    GradientBoostingClassifier(n_estimators=80, learning_rate=0.1, random_state=42),
+    SVC(kernel="rbf", probability=True, random_state=42),
+    LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=1000, random_state=42),
+    ExtraTreesClassifier(n_estimators=100, max_depth=6, random_state=42)
+]
+
+# ----------------------------
+# 4. Out-of-fold предсказания (OOF)
+# ----------------------------
+n_splits = 5
+skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+oof_preds = np.zeros((len(y), n_models))  # матрица OOF-предсказаний
+
+for model_idx, model in enumerate(base_models):
+    features = feature_groups[model_idx]
+    for train_idx, val_idx in skf.split(X, y):
+        X_train, X_val = df.loc[train_idx, features], df.loc[val_idx, features]
+        y_train, y_val = y[train_idx], y[val_idx]
+
+        # Масштабирование только на train, применение на val
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_val_scaled = scaler.transform(X_val)
+
+        model.fit(X_train_scaled, y_train)
+        proba = model.predict_proba(X_val_scaled)[:, 1]  # вероятность класса 1
+        oof_preds[val_idx, model_idx] = proba
+
+# Проверка: нет ли NaN
+assert not np.isnan(oof_preds).any(), "OOF предсказания содержат NaN"
+
+# ----------------------------
+# 5. Мета-модель: логистическая регрессия через scipy
+# ----------------------------
+def sigmoid(z):
+    # численно устойчивая версия
+    return np.where(z >= 0, 1 / (1 + np.exp(-z)), np.exp(z) / (1 + np.exp(z)))
+
+def meta_loss(params, X_meta, y_true, l2_reg=1.0):
+    """
+    params: [w0, w1, ..., wn] — веса (включая bias)
+    X_meta: матрица признаков (OOF-предсказания)
+    y_true: истинные метки
+    l2_reg: коэффициент L2-регуляризации
+    """
+    w = params
+    z = X_meta @ w[1:] + w[0]  # w[0] — bias
+    p = sigmoid(z)
+    # Binary cross-entropy
+    eps = 1e-15
+    p = np.clip(p, eps, 1 - eps)
+    bce = -np.mean(y_true * np.log(p) + (1 - y_true) * np.log(1 - p))
+    l2 = l2_reg * np.sum(w[1:]**2)  # не регуляризуем bias
+    return bce + l2
+
+# Подготовка данных для мета-модели
+X_meta = oof_preds.copy()
+y_meta = y.copy()
+
+# Начальные веса: нули
+n_meta_features = X_meta.shape[1]
+initial_params = np.zeros(n_meta_features + 1)  # +1 для bias
+
+res = minimize(
+    fun=meta_loss,
+    x0=initial_params,
+    args=(X_meta, y_meta, 1.0),
+    method="L-BFGS-B"
+)
+
+if not res.success:
+    raise RuntimeError("Оптимизация мета-модели не сошлась")
+
+meta_weights = res.x
+print("Веса мета-модели (bias, w1, w2, ...):", meta_weights)
+
+# Функция предсказания мета-модели
+def meta_predict(X_new, weights):
+    z = X_new @ weights[1:] + weights[0]
+    p = sigmoid(z)
+    return (p >= 0.5).astype(int), p
+
+# ----------------------------
+# 6. Оценка на тестовой части (hold-out)
+# ----------------------------
+from sklearn.model_selection import train_test_split
+
+X_train_full, X_test, y_train_full, y_test = train_test_split(
+    df.drop("target", axis=1), df["target"], test_size=0.2, stratify=df["target"], random_state=42
+)
+
+# Переобучение базовых моделей на полном train (для финального прогноза)
+final_base_preds = np.zeros((len(X_test), n_models))
+
+for model_idx, model in enumerate(base_models):
+    features = feature_groups[model_idx]
+    X_tr = X_train_full[features]
+    y_tr = y_train_full
+    X_te = X_test[features]
+
+    scaler = StandardScaler()
+    X_tr_scaled = scaler.fit_transform(X_tr)
+    X_te_scaled = scaler.transform(X_te)
+
+    model.fit(X_tr_scaled, y_tr)
+    proba = model.predict_proba(X_te_scaled)[:, 1]
+    final_base_preds[:, model_idx] = proba
+
+# Предсказание мета-модели на тестовых OOF-подобных признаках
+y_pred_meta, y_prob_meta = meta_predict(final_base_preds, meta_weights)
+
+acc_meta = accuracy_score(y_test, y_pred_meta)
+ll_meta = log_loss(y_test, y_prob_meta)
+print(f"Accuracy (мета-модель): {acc_meta:.4f}")
+print(f"LogLoss (мета-модель): {ll_meta:.4f}")
+
+# Для сравнения: простой бейзлайн — усреднение вероятностей базовых моделей
+y_prob_avg = final_base_preds.mean(axis=1)
+y_pred_avg = (y_prob_avg >= 0.5).astype(int)
+acc_avg = accuracy_score(y_test, y_pred_avg)
+ll_avg = log_loss(y_test, y_prob_avg)
+print(f"Accuracy (усреднение): {acc_avg:.4f}")
+print(f"LogLoss (усреднение): {ll_avg:.4f}")
+
+# ----------------------------
+# 7. Визуализация
+# ----------------------------
+plt.style.use("seaborn-v0_8-whitegrid")
+fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+
+# 1. Сравнение accuracy
+labels = ["Мета-модель", "Усреднение"]
+accs = [acc_meta, acc_avg]
+axs[0].bar(labels, accs, color=["#2E86AB", "#A23B72"])
+axs[0].set_ylim(0, 1)
+axs[0].set_title("Сравнение Accuracy")
+axs[0].set_ylabel("Accuracy")
+for i, v in enumerate(accs):
+    axs[0].text(i, v + 0.01, f"{v:.3f}", ha="center")
+
+# 2. Распределение вероятностей
+axs[1].hist(y_prob_meta[y_test == 1], bins=30, alpha=0.7, label="Класс 1", color="#2E86AB")
+axs[1].hist(y_prob_meta[y_test == 0], bins=30, alpha=0.7, label="Класс 0", color="#A23B72")
+axs[1].set_xlabel("Вероятность (мета-модель)")
+axs[1].set_ylabel("Частота")
+axs[1].set_title("Распределение вероятностей по классам")
+axs[1].legend()
+
+# 3. Confusion matrix
+cm = confusion_matrix(y_test, y_pred_meta)
+im = axs[2].imshow(cm, cmap="Blues", interpolation="nearest")
+axs[2].set_title("Confusion Matrix (мета-модель)")
+axs[2].set_xticks([0, 1])
+axs[2].set_yticks([0, 1])
+axs[2].set_xticklabels(["Pred 0", "Pred 1"])
+axs[2].set_yticklabels(["True 0", "True 1"])
+for i in range(2):
+    for j in range(2):
+        axs[2].text(j, i, str(cm[i, j]), ha="center", va="center", color="white" if cm[i, j] > cm.max()/2 else "black")
+
+plt.tight_layout()
+plt.show()
