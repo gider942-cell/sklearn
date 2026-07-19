@@ -1,0 +1,225 @@
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+
+import matplotlib.pyplot as plt
+
+# -----------------------------
+# 1. Генерация синтетических данных
+# -----------------------------
+np.random.seed(42)
+n_samples = 7000
+
+data = {
+    'customerID': [f'C{i:05d}' for i in range(n_samples)],
+    'gender': np.random.choice(['Male', 'Female'], n_samples),
+    'SeniorCitizen': np.random.choice([0, 1], n_samples, p=[0.8, 0.2]),
+    'Partner': np.random.choice(['Yes', 'No'], n_samples),
+    'Dependents': np.random.choice(['Yes', 'No'], n_samples),
+    'tenure': np.clip(np.random.normal(36, 24, n_samples), 0, 72).astype(int),
+    'PhoneService': np.random.choice(['Yes', 'No'], n_samples),
+    'MultipleLines': np.random.choice(['No phone service', 'No', 'Yes'], n_samples),
+    'InternetService': np.random.choice(['DSL', 'Fiber optic', 'No'], n_samples),
+    'OnlineSecurity': np.random.choice(['No', 'Yes', 'No internet service'], n_samples),
+    'OnlineBackup': np.random.choice(['No', 'Yes', 'No internet service'], n_samples),
+    'DeviceProtection': np.random.choice(['No', 'Yes', 'No internet service'], n_samples),
+    'TechSupport': np.random.choice(['No', 'Yes', 'No internet service'], n_samples),
+    'StreamingTV': np.random.choice(['No', 'Yes', 'No internet service'], n_samples),
+    'StreamingMovies': np.random.choice(['No', 'Yes', 'No internet service'], n_samples),
+    'Contract': np.random.choice(['Month-to-month', 'One year', 'Two year'], n_samples),
+    'PaperlessBilling': np.random.choice(['Yes', 'No'], n_samples),
+    'PaymentMethod': np.random.choice(
+        ['Electronic check', 'Mailed check', 'Bank transfer (automatic)', 'Credit card (automatic)'],
+        n_samples
+    ),
+    'MonthlyCharges': np.round(np.random.normal(65, 20, n_samples), 2),
+    'TotalCharges': np.round(np.random.normal(2500, 1500, n_samples), 2)
+}
+
+df = pd.DataFrame(data)
+
+# Создаём целевую переменную Churn
+churn_prob = (
+    0.1 +
+    0.003 * df['MonthlyCharges'] -
+    0.015 * df['tenure'] +
+    (df['Contract'] == 'Month-to-month').astype(float) * 0.3 +
+    (df['InternetService'] == 'Fiber optic').astype(float) * 0.15
+)
+churn_prob = np.clip(churn_prob, 0, 1)
+df['Churn'] = (np.random.rand(n_samples) < churn_prob).astype(int).map({1: 'Yes', 0: 'No'})
+df['Churn'] = df['Churn'].map({'Yes': 1, 'No': 0})
+
+# Удаляем customerID
+if 'customerID' in df.columns:
+    df = df.drop(columns=['customerID'])
+
+# Обрабатываем TotalCharges: приводим к numeric, заполняем пропуски
+df['TotalCharges'] = pd.to_numeric(df['TotalCharges'], errors='coerce')
+median_val = df['TotalCharges'].median()
+df['TotalCharges'] = df['TotalCharges'].fillna(median_val)
+
+# Определяем типы признаков ПОСЛЕ всех преобразований
+numeric_features = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+categorical_features = df.select_dtypes(include=['object']).columns.tolist()
+
+# Убедимся, что Churn не попал в признаки
+if 'Churn' in numeric_features:
+    numeric_features.remove('Churn')
+if 'Churn' in categorical_features:
+    categorical_features.remove('Churn')
+
+# Разделяем признаки и целевую переменную
+X = df.drop('Churn', axis=1)
+y = df['Churn']
+
+# Проверяем, что все колонки из списков действительно есть в X
+missing_num = set(numeric_features) - set(X.columns)
+missing_cat = set(categorical_features) - set(X.columns)
+if missing_num or missing_cat:
+    raise ValueError(f"Отсутствуют колонки в X: {missing_num | missing_cat}")
+
+# -----------------------------
+# Пайплайн предобработки
+# -----------------------------
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), numeric_features),
+        ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
+    ]
+)
+
+# -----------------------------
+# Разделение на train/test
+# -----------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# -----------------------------
+# Модели
+# -----------------------------
+models = {
+    "Logistic Regression": LogisticRegression(max_iter=1000, class_weight='balanced'),
+    "Random Forest": RandomForestClassifier(n_estimators=200, random_state=42, class_weight='balanced', n_jobs=-1),
+    "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+}
+
+results = {}
+
+for name, model in models.items():
+    print(f"\n=== Обучение модели: {name} ===")
+    
+    clf = Pipeline(steps=[
+        ('preprocess', preprocessor),
+        ('model', model)
+    ])
+    
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    y_prob = clf.predict_proba(X_test)[:, 1]
+    
+    results[name] = {
+        "model": clf,
+        "y_pred": y_pred,
+        "y_prob": y_prob
+    }
+    
+    print(classification_report(y_test, y_pred))
+    print("ROC-AUC:", roc_auc_score(y_test, y_prob))
+    print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
+
+# -----------------------------
+# Выбор лучшей модели
+# -----------------------------
+best_name = max(results, key=lambda k: roc_auc_score(y_test, results[k]["y_prob"]))
+print(f"\nЛучшая модель по ROC-AUC: {best_name}")
+
+# -----------------------------
+# Важность признаков
+# -----------------------------
+best_clf = results[best_name]["model"]
+
+ohe = best_clf.named_steps['preprocess'].named_transformers_['cat']
+cat_feature_names = ohe.get_feature_names_out(categorical_features)
+feature_names = np.concatenate([numeric_features, cat_feature_names])
+
+if hasattr(best_clf.named_steps['model'], 'feature_importances_'):
+    importances = best_clf.named_steps['model'].feature_importances_
+    feat_imp = pd.Series(importances, index=feature_names).sort_values(ascending=False)
+    
+    top_n = 20
+    top_features = feat_imp.head(top_n)
+    
+    plt.figure(figsize=(10, 8))
+    plt.barh(top_features.index, top_features.values, color='skyblue', edgecolor='black')
+    plt.xlabel('Важность признака')
+    plt.title(f'Топ-{top_n} важных признаков ({best_name})')
+    plt.gca().invert_yaxis()
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Модель не поддерживает feature_importances_; пропускаем визуализацию важности.")
+
+# -----------------------------
+# Прогноз для новых клиентов
+# -----------------------------
+new_customers = pd.DataFrame([
+    {
+        'gender': 'Female',
+        'SeniorCitizen': 0,
+        'Partner': 'Yes',
+        'Dependents': 'No',
+        'tenure': 12,
+        'PhoneService': 'Yes',
+        'MultipleLines': 'No phone service',
+        'InternetService': 'DSL',
+        'OnlineSecurity': 'No',
+        'OnlineBackup': 'No',
+        'DeviceProtection': 'No',
+        'TechSupport': 'No',
+        'StreamingTV': 'No',
+        'StreamingMovies': 'No',
+        'Contract': 'Month-to-month',
+        'PaperlessBilling': 'Yes',
+        'PaymentMethod': 'Electronic check',
+        'MonthlyCharges': 70.0,
+        'TotalCharges': 840.0
+    },
+    {
+        'gender': 'Male',
+        'SeniorCitizen': 1,
+        'Partner': 'No',
+        'Dependents': 'No',
+        'tenure': 48,
+        'PhoneService': 'No',
+        'MultipleLines': 'No',
+        'InternetService': 'Fiber optic',
+        'OnlineSecurity': 'Yes',
+        'OnlineBackup': 'Yes',
+        'DeviceProtection': 'Yes',
+        'TechSupport': 'Yes',
+        'StreamingTV': 'Yes',
+        'StreamingMovies': 'Yes',
+        'Contract': 'Two year',
+        'PaperlessBilling': 'No',
+        'PaymentMethod': 'Mailed check',
+        'MonthlyCharges': 100.0,
+        'TotalCharges': 4800.0
+    }
+])
+
+pred_probs = best_clf.predict_proba(new_customers)[:, 1]
+pred_labels = best_clf.predict(new_customers)
+
+for i, (prob, label) in enumerate(zip(pred_probs, pred_labels)):
+    print(f"Клиент {i+1}: вероятность оттока = {prob:.3f}, прогноз = {'Churn' if label==1 else 'No Churn'}")
