@@ -1,0 +1,150 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+
+# -------------------------------------------------
+# 1. Генерация синтетических данных о транзакциях
+# -------------------------------------------------
+np.random.seed(42)
+n_samples = 10000
+
+amount = np.random.exponential(scale=100, size=n_samples)
+time_since_last_tx = np.random.exponential(scale=60, size=n_samples)
+num_tx_last_24h = np.random.poisson(lam=5, size=n_samples).clip(1, 50)
+distance_from_home = np.random.gamma(shape=2, scale=50, size=n_samples)
+is_weekend = np.random.binomial(1, 0.3, size=n_samples)
+card_age_days = np.random.normal(loc=180, scale=90, size=n_samples).clip(1, 1095)
+
+df = pd.DataFrame({
+    "amount": amount,
+    "time_since_last_tx": time_since_last_tx,
+    "num_tx_last_24h": num_tx_last_24h,
+    "distance_from_home": distance_from_home,
+    "is_weekend": is_weekend,
+    "card_age_days": card_age_days
+})
+
+# Генерация целевой переменной (fraud)
+logit = (
+    -3.5 
+    - 0.015 * df["amount"]
+    - 0.0095 * df["distance_from_home"]
+    - 0.082 * df["time_since_last_tx"]
+    - 0.1 * df["num_tx_last_24h"]
+    -0.3 * df["card_age_days"]
+)
+prob_fraud = 1 / (1 + np.exp(-logit))
+fraud = (np.random.rand(n_samples) < prob_fraud).astype(int)
+
+df["fraud"] = fraud
+
+print("Баланс классов:")
+print(df["fraud"].value_counts())
+
+# -------------------------------------------------
+# 2. Подготовка данных для модели
+# -------------------------------------------------
+X = df.drop(columns=["fraud"])
+y = df["fraud"]
+
+# stratify=y сохраняет баланс классов в train/test
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# SMOTE удалён. Вместо него полагаемся на class_weight в модели
+print("\nSMOTE не используется. Используем class_weight='balanced' в модели.")
+
+# -------------------------------------------------
+# 3. Обучение модели (Random Forest)
+# -------------------------------------------------
+model = RandomForestClassifier(
+    n_estimators=200,
+    max_depth=None,
+    class_weight="balanced",  # Ключевой параметр для работы с дисбалансом
+    random_state=42,
+    n_jobs=-1
+)
+model.fit(X_train_scaled, y_train)  # Обучаем на исходных (несбалансированных) данных
+
+# -------------------------------------------------
+# 4. Оценка качества модели
+# -------------------------------------------------
+y_pred = model.predict(X_test_scaled)
+y_pred_proba = model.predict_proba(X_test_scaled)[:, 1]
+
+print("\nConfusion Matrix:")
+print(confusion_matrix(y_test, y_pred))
+
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, digits=4))
+
+print(f"ROC-AUC: {roc_auc_score(y_test, y_pred_proba):.4f}")
+
+# Важность признаков
+feature_importance = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
+print("\nВажность признаков:")
+print(feature_importance)
+
+# -------------------------------------------------
+# 5. Пример предсказания для новых транзакций
+# -------------------------------------------------
+new_transactions = pd.DataFrame([
+    {
+        "amount": 1500,
+        "time_since_last_tx": 5,
+        "num_tx_last_24h": 12,
+        "distance_from_home": 800,
+        "is_weekend": 1,
+        "card_age_days": 7
+    },
+    {
+        "amount": 50,
+        "time_since_last_tx": 1440,
+        "num_tx_last_24h": 1,
+        "distance_from_home": 5,
+        "is_weekend": 0,
+        "card_age_days": 365
+    }
+])
+
+new_transactions_scaled = scaler.transform(new_transactions)
+preds = model.predict(new_transactions_scaled)
+probs = model.predict_proba(new_transactions_scaled)[:, 1]
+
+for i, (p, prob) in enumerate(zip(preds, probs)):
+    label = "FRAUD" if p == 1 else "LEGIT"
+    print(f"\nТранзакция {i+1}: {label} (вероятность мошенничества: {prob:.4f})")
+
+import matplotlib.pyplot as plt
+from sklearn.metrics import RocCurveDisplay, ConfusionMatrixDisplay
+
+# ROC Curve
+plt.figure(figsize=(8, 6))
+RocCurveDisplay.from_predictions(y_test, y_pred_proba)
+plt.title("ROC Curve")
+plt.grid(alpha=0.3)
+plt.show()
+
+# Confusion Matrix
+plt.figure(figsize=(6, 5))
+ConfusionMatrixDisplay.from_predictions(y_test, y_pred, cmap="Blues")
+plt.title("Confusion Matrix")
+plt.show()
+
+# Feature Importance
+plt.figure(figsize=(10, 6))
+feature_importance.plot(kind="barh")
+plt.xlabel("Importance")
+plt.ylabel("Feature")
+plt.title("Feature Importance (Random Forest)")
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.show()
