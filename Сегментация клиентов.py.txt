@@ -1,0 +1,94 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_blobs
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
+X, y_true = make_blobs(
+    n_samples=300,
+    centers=[
+        [50, 2],
+        [150, 8],  
+        [300, 15],
+        [-1, 0],
+        [1000, 4]
+    ],
+    cluster_std=[15, 2, 3, 5, 10],
+    random_state=42,
+    shuffle=True
+)
+
+noise = np.random.normal(0, 5, X.shape)
+X += noise
+
+feature_names = ['Средний чек (руб)', 'Частота покупок (раз/мес)']
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+inertias = []
+K_range = range(1, 11)
+
+for k in K_range:
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
+    kmeans.fit(X_scaled)
+    inertias.append(kmeans.inertia_)
+
+plt.figure(figsize=(10, 6))
+plt.plot(K_range, inertias, marker='o')
+plt.title('Метод локтя для выбора количества кластеров')
+plt.xlabel('Количество кластеров (K)')
+plt.ylabel('Инерция (Within-cluster sum of squares)')
+plt.grid(True)
+plt.show()
+
+def find_elbow(inertias, K_range):
+
+    diffs = np.diff(inertias)
+    acceleration = np.diff(diffs)
+
+    elbow_idx = np.argmax(acceleration) + 1
+    return K_range[elbow_idx]
+
+import numpy as np
+
+elbow_k = find_elbow(inertias, list(K_range))
+print(f"Рекомендуемое количество кластеров по методу локтя: {elbow_k}")
+kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
+y_kmeans = kmeans.fit_predict(X_scaled)
+
+score = silhouette_score(X_scaled, y_kmeans)
+print(f"Silhouette Score: {score:.3f}")
+
+centers_original_scale = scaler.inverse_transform(kmeans.cluster_centers_)
+
+print("\nЦентры кластеров (в исходных единицах):")
+for i, center in enumerate(centers_original_scale):
+    print(f"Кластер {i}: Средний чек = {center[0]:.2f} руб, Частота = {center[1]:.2f} раз/мес")
+
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+scatter1 = plt.scatter(X[:, 0], X[:, 1], c=y_true, cmap='viridis', alpha=0.6, edgecolors='w', s=50)
+plt.title('Реальные сегменты (синтетические данные)')
+plt.xlabel(feature_names[0])
+plt.ylabel(feature_names[1])
+plt.colorbar(scatter1, label='Реальный сегмент')
+
+plt.subplot(1, 2, 2)
+scatter2 = plt.scatter(X[:, 0], X[:, 1], c=y_kmeans, cmap='plasma', alpha=0.6, edgecolors='w', s=50)
+
+plt.scatter(
+    centers_original_scale[:, 0], 
+    centers_original_scale[:, 1], 
+    c='red', s=200, marker='X', edgecolors='black', label='Центры кластеров'
+)
+plt.title(f'Сегментация клиентов (K-Means, K={k})')
+plt.xlabel(feature_names[0])
+plt.ylabel(feature_names[1])
+plt.legend()
+plt.colorbar(scatter2, label='Предсказанный кластер')
+
+plt.tight_layout()
+plt.show()
